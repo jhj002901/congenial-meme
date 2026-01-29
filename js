@@ -1,529 +1,573 @@
-/**********************
- * LIFE-MOGOTCHI · Complete JS (Drop-in)
- * - Zodiac (12) selection
- * - Movement (Arrow / WASD) + .moving toggle + bump on direction change
- * - Actions: Feed / Exercise / Rest / Talk
- * - Daily logic (streak + day-change decay)
- * - Continuous decay + autosave
- * - Theme support (optional): <html data-theme="lcd-green|lcd-blue|mono">
- *   If you add buttons with data-theme, it will auto-bind.
- *
- * ✅ HOW TO USE
- * 1) Replace your existing <script> ... </script> with this code.
- * 2) Keep the same HTML IDs as your current file.
- **********************/
+/* =========================================================
+  CAT-MOGOTCHI · app.js
+  - Works with the "device + screen + pet + 3D cat" HTML
+  - Robust: will run even if some optional nodes don't exist
+========================================================= */
 
 (() => {
   "use strict";
 
-  const STORAGE_KEY = "life_mogotchi_zodiac_v2";
+  /* ---------- helpers ---------- */
+  const $ = (sel, root = document) => root.querySelector(sel);
+  const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+  const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
+  const now = () => Date.now();
 
-  const ZODIAC = [
-    { key: "rat", name: "쥐", emoji: "🐭" },
-    { key: "ox", name: "소", emoji: "🐮" },
-    { key: "tiger", name: "호랑이", emoji: "🐯" },
-    { key: "rabbit", name: "토끼", emoji: "🐰" },
-    { key: "dragon", name: "용", emoji: "🐲" },
-    { key: "snake", name: "뱀", emoji: "🐍" },
-    { key: "horse", name: "말", emoji: "🐴" },
-    { key: "goat", name: "양", emoji: "🐑" },
-    { key: "monkey", name: "원숭이", emoji: "🐵" },
-    { key: "rooster", name: "닭", emoji: "🐔" },
-    { key: "dog", name: "개", emoji: "🐶" },
-    { key: "pig", name: "돼지", emoji: "🐷" },
-  ];
+  const rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+  const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+  const fmt2 = (n) => String(n).padStart(2, "0");
 
-  const $ = (s) => document.querySelector(s);
-  const $$ = (s) => Array.from(document.querySelectorAll(s));
-
-  const ui = {
-    screen: $("#screen"),
-    char: $("#char"),
-    sprite: $("#sprite"),
-    bubble: $("#bubble"),
-    nameplate: $("#nameplate"),
-    zodiacName: $("#zodiacName"),
+  /* ---------- DOM (expected ids from earlier HTML) ---------- */
+  const el = {
     moodText: $("#moodText"),
-    hungerBar: $("#hungerBar"),
-    energyBar: $("#energyBar"),
-    streakText: $("#streakText"),
-
-    modal: $("#modal"),
-    zgrid: $("#zgrid"),
-    openPicker: $("#openPicker"),
-    closePicker: $("#closePicker"),
-
-    saveNow: $("#saveNow"),
-    hardReset: $("#hardReset"),
+    petName: $("#petName"),
+    zodiacLabel: $("#zodiacLabel"),
+    bubble: $("#bubble"),
+    pet: $("#pet"),
+    screen: $("#screen"),
 
     btnFeed: $("#btnFeed"),
-    btnExercise: $("#btnExercise"),
+    btnPlay: $("#btnPlay"),
     btnRest: $("#btnRest"),
+    btnClean: $("#btnClean"),
     btnTalk: $("#btnTalk"),
+
+    saveNow: $("#saveNow"),
+    resetAll: $("#resetAll"),
+
+    hungerBar: $("#hungerBar i") || $("#barHunger"),
+    energyBar: $("#energyBar i") || $("#barEnergy"),
+    cleanBar: $("#cleanBar i") || $("#barClean"),
+
+    themeBtns: $$(".tbtn"),
+    clock: $("#clock"),
+
+    // optional zodiac select mode (if you later add it)
+    btnZodiac: $("#btnZodiac"),
+    select: $("#select"),
+    prevZodiac: $("#prevZodiac"),
+    nextZodiac: $("#nextZodiac"),
+    okZodiac: $("#okZodiac"),
+    backZodiac: $("#backZodiac"),
+    zodiacEmoji: $("#zodiacEmoji"),
+    zodiacName: $("#zodiacName"),
+    zodiacHint: $("#zodiacHint"),
   };
 
-  // Optional theme buttons: <button data-theme="lcd-blue">Blue</button>
-  const themeButtons = $$("[data-theme]");
+  /* ---------- ZODIAC data ---------- */
+  const ZODIACS = [
+    { key: "rat", emoji: "🐭", name: "쥐", hint: "민첩 / 호기심" },
+    { key: "ox", emoji: "🐮", name: "소", hint: "꾸준 / 성실" },
+    { key: "tiger", emoji: "🐯", name: "호랑이", hint: "용기 / 추진" },
+    { key: "rabbit", emoji: "🐰", name: "토끼", hint: "섬세 / 배려" },
+    { key: "dragon", emoji: "🐲", name: "용", hint: "야망 / 카리스마" },
+    { key: "snake", emoji: "🐍", name: "뱀", hint: "집중 / 직관" },
+    { key: "horse", emoji: "🐴", name: "말", hint: "자유 / 에너지" },
+    { key: "goat", emoji: "🐑", name: "양", hint: "온화 / 예술" },
+    { key: "monkey", emoji: "🐵", name: "원숭이", hint: "재치 / 실험" },
+    { key: "rooster", emoji: "🐔", name: "닭", hint: "정리 / 계획" },
+    { key: "dog", emoji: "🐶", name: "개", hint: "충성 / 우정" },
+    { key: "pig", emoji: "🐷", name: "돼지", hint: "풍요 / 낙천" },
+  ];
 
-  /* -------------------- Utils -------------------- */
-  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-  const now = () => Date.now();
-  const randPick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+  /* ---------- STATE ---------- */
+  const STORAGE_KEY = "catmogotchi_v1";
 
-  function dayKey(ts = Date.now()) {
-    const d = new Date(ts);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const defaultState = () => ({
+    petName: "냥이",
+    zodiacIndex: 0,
+    theme: "lcd-green",
+
+    // stats 0..100
+    hunger: 70,
+    energy: 70,
+    clean: 70,
+
+    // position inside screen (percent)
+    x: 50,
+    y: 52,
+
+    // meta
+    lastTick: now(),
+    lastAction: now(),
+    streak: 0, // fun extra
+  });
+
+  let state = loadState() || defaultState();
+
+  // selection mode index (for zodiac carousel if present)
+  let zodiacCursor = state.zodiacIndex;
+
+  /* ---------- INIT ---------- */
+  applyTheme(state.theme);
+  renderAll(true);
+  setClock();
+  setInterval(setClock, 1000 * 15);
+
+  // main tick: decay + random events
+  setInterval(mainTick, 1000); // 1s
+
+  // autosave periodically
+  setInterval(() => saveState(state), 5000);
+
+  // Bind UI actions
+  bindButtons();
+  bindKeys();
+
+  // Show a welcome bubble
+  bubble(pick([
+    "오늘도 나를 돌봐줘 😺",
+    "밥… 줘… 🍚",
+    "놀아줘! 🧶",
+    "청소도… 부탁… 🧽",
+  ]), 1400);
+
+  /* =========================================================
+    FUNCTIONS
+  ========================================================= */
+
+  function bindButtons() {
+    el.btnFeed?.addEventListener("click", () => act("feed"));
+    el.btnPlay?.addEventListener("click", () => act("play"));
+    el.btnRest?.addEventListener("click", () => act("rest"));
+    el.btnClean?.addEventListener("click", () => act("clean"));
+    el.btnTalk?.addEventListener("click", () => act("talk"));
+
+    el.saveNow?.addEventListener("click", () => {
+      saveState(state);
+      bump();
+      bubble("저장 완료! 💾", 900);
+    });
+
+    el.resetAll?.addEventListener("click", () => {
+      if (!confirm("정말 초기화할까? (저장된 데이터가 삭제됨)")) return;
+      state = defaultState();
+      zodiacCursor = state.zodiacIndex;
+      applyTheme(state.theme);
+      renderAll(true);
+      saveState(state);
+      bubble("초기화했어. 다시 시작! ✨", 1200);
+    });
+
+    // theme buttons
+    el.themeBtns.forEach((b) => {
+      b.addEventListener("click", () => {
+        const t = b.dataset.theme;
+        applyTheme(t);
+        state.theme = t;
+        el.themeBtns.forEach((x) => x.classList.toggle("active", x === b));
+        bump();
+      });
+    });
+
+    // zodiac select mode (optional)
+    el.btnZodiac?.addEventListener("click", () => openZodiacSelect());
+    el.backZodiac?.addEventListener("click", () => closeZodiacSelect());
+    el.prevZodiac?.addEventListener("click", () => zodiacStep(-1));
+    el.nextZodiac?.addEventListener("click", () => zodiacStep(+1));
+    el.okZodiac?.addEventListener("click", () => confirmZodiac());
   }
 
-  function zodiacByKey(key) {
-    return ZODIAC.find((z) => z.key === key) || null;
+  function bindKeys() {
+    window.addEventListener("keydown", (e) => {
+      const key = e.key.toLowerCase();
+
+      // If zodiac select open, handle it
+      if (isZodiacOpen()) {
+        if (key === "escape") return closeZodiacSelect();
+        if (key === "arrowleft" || key === "a") return zodiacStep(-1);
+        if (key === "arrowright" || key === "d") return zodiacStep(+1);
+        if (key === "enter" || key === " ") return confirmZodiac();
+        return;
+      }
+
+      // actions shortcuts
+      if (key === "f") return act("feed");
+      if (key === "p") return act("play");
+      if (key === "r") return act("rest");
+      if (key === "c") return act("clean");
+      if (key === "t") return act("talk");
+      if (key === "z") return openZodiacSelect();
+
+      // movement
+      const moveKeys = ["arrowup", "arrowdown", "arrowleft", "arrowright", "w", "a", "s", "d"];
+      if (!moveKeys.includes(key)) return;
+
+      e.preventDefault();
+
+      if (key === "arrowup" || key === "w") movePet(0, -1);
+      if (key === "arrowdown" || key === "s") movePet(0, +1);
+      if (key === "arrowleft" || key === "a") movePet(-1, 0);
+      if (key === "arrowright" || key === "d") movePet(+1, 0);
+    });
   }
 
-  function safeJSONParse(raw) {
-    try { return JSON.parse(raw); } catch { return null; }
+  function setClock() {
+    if (!el.clock) return;
+    const d = new Date();
+    el.clock.textContent = `${fmt2(d.getHours())}:${fmt2(d.getMinutes())}`;
   }
 
-  /* -------------------- State -------------------- */
-  function defaultState() {
-    return {
-      zodiacKey: "",
-      pos: { x: 0, y: 0 },  // px within screen
-      dir: { x: 0, y: 0 },  // movement direction (-1..1)
-      lastDir: { x: 0, y: 0 },
+  function renderAll(force = false) {
+    // labels
+    if (el.petName) el.petName.textContent = state.petName;
+    if (el.zodiacLabel) {
+      const z = ZODIACS[state.zodiacIndex];
+      el.zodiacLabel.textContent = z ? `${z.emoji} ${z.name}` : "—";
+    }
 
-      hunger: 55,  // 0..100 (higher = 더 배부름)
-      energy: 60,  // 0..100
-      mood: 50,    // 0..100 internal (not shown)
+    // theme button active state
+    if (el.themeBtns.length) {
+      el.themeBtns.forEach((b) => b.classList.toggle("active", b.dataset.theme === state.theme));
+    }
 
-      streak: 0,
-      lastActiveDay: "",
+    // stats bars
+    setBar(el.hungerBar, state.hunger);
+    setBar(el.energyBar, state.energy);
+    setBar(el.cleanBar, state.clean);
 
-      lastSavedAt: 0,
-      lastActionAt: 0,
+    // mood
+    const m = computeMood(state);
+    if (el.moodText) el.moodText.textContent = m.label;
 
-      // simple behavior / idle
-      lastTalkAt: 0,
-    };
+    // pet position
+    if (el.pet) {
+      el.pet.style.left = `${state.x}%`;
+      el.pet.style.top = `${state.y}%`;
+    }
+
+    if (force) {
+      // ensure cursor used by zodiac select
+      zodiacCursor = state.zodiacIndex;
+      renderZodiacCard();
+    }
   }
 
-  let state = loadState();
-
-  function loadState() {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return defaultState();
-
-    const parsed = safeJSONParse(raw);
-    if (!parsed) return defaultState();
-
-    const base = defaultState();
-    // merge with defaults
-    const merged = {
-      ...base,
-      ...parsed,
-      pos: { ...base.pos, ...(parsed.pos || {}) },
-      dir: { ...base.dir, ...(parsed.dir || {}) },
-      lastDir: { ...base.lastDir, ...(parsed.lastDir || {}) },
-    };
-
-    return merged;
-  }
-
-  function saveState() {
-    state.lastSavedAt = now();
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  }
-
-  /* -------------------- UI Helpers -------------------- */
-  function showBubble(msg, ms = 1400) {
-    if (!ui.bubble) return;
-    ui.bubble.textContent = msg;
-    ui.bubble.classList.add("show");
-    clearTimeout(showBubble._t);
-    showBubble._t = setTimeout(() => ui.bubble.classList.remove("show"), ms);
-  }
-
-  function setBar(el, value) {
-    if (!el) return;
+  function setBar(barEl, value) {
+    if (!barEl) return;
     const v = clamp(value, 0, 100);
-    const i = el.querySelector("i");
-    if (i) i.style.width = `${v}%`;
-    el.classList.toggle("warn", v < 55 && v >= 30);
-    el.classList.toggle("bad", v < 30);
+    barEl.style.width = `${v}%`;
+
+    // optional visual states if your CSS uses .warn/.bad on parent
+    const parent = barEl.closest(".bar");
+    if (parent) {
+      parent.classList.toggle("bad", v < 25);
+      parent.classList.toggle("warn", v >= 25 && v < 45);
+    }
   }
 
-  function moodLabel() {
-    // hunger/energy -> overall mood label
-    const score = state.hunger * 0.55 + state.energy * 0.45;
-    if (score >= 72) return { text: "좋음", face: "🙂" };
-    if (score >= 45) return { text: "보통", face: "😐" };
-    return { text: "힘듦", face: "😞" };
+  function computeMood(s) {
+    // weighted score
+    const score = (s.hunger * 0.40) + (s.energy * 0.35) + (s.clean * 0.25);
+    if (score >= 78) return { key: "great", label: "좋음" };
+    if (score >= 55) return { key: "ok", label: "보통" };
+    if (score >= 35) return { key: "tired", label: "지침" };
+    return { key: "bad", label: "위험" };
   }
 
-  function ensurePosition() {
-    if (!ui.screen) return;
-    const rect = ui.screen.getBoundingClientRect();
-    const cw = 120, ch = 120;
-    const pad = 8;
+  /* ---------- actions ---------- */
+  function act(type) {
+    // action cooldown feel
+    bump();
 
-    if (state.pos.x === 0 && state.pos.y === 0) {
-      state.pos.x = rect.width / 2 - cw / 2;
-      state.pos.y = rect.height * 0.58 - ch / 2;
+    const beforeMood = computeMood(state).key;
+
+    switch (type) {
+      case "feed": {
+        const gain = rand(12, 24);
+        state.hunger = clamp(state.hunger + gain, 0, 100);
+        state.clean = clamp(state.clean - rand(2, 5), 0, 100); // eating makes a bit dirty
+        bubble(pick([
+          "냠냠! 🍚",
+          "배가 든든해졌어 😺",
+          "밥 최고…!",
+          "간식도… 있나? 👀",
+        ]), 1200);
+        break;
+      }
+      case "play": {
+        const cost = rand(8, 16);
+        state.energy = clamp(state.energy - cost, 0, 100);
+        state.clean = clamp(state.clean - rand(1, 4), 0, 100);
+        state.hunger = clamp(state.hunger - rand(1, 4), 0, 100);
+        bubble(pick([
+          "놀자! 🧶",
+          "꺄악 신난다!",
+          "잡았다!! 😼",
+          "한 판 더? 👾",
+        ]), 1200);
+        // tiny reward
+        if (Math.random() < 0.18) {
+          state.hunger = clamp(state.hunger + 6, 0, 100);
+          bubble("보너스 간식 발견! 🍪", 1200);
+        }
+        break;
+      }
+      case "rest": {
+        const gain = rand(14, 28);
+        state.energy = clamp(state.energy + gain, 0, 100);
+        state.hunger = clamp(state.hunger - rand(1, 3), 0, 100);
+        bubble(pick([
+          "Zzz… 😴",
+          "잠깐 충전 완료!",
+          "휴식은 중요해…",
+        ]), 1200);
+        break;
+      }
+      case "clean": {
+        const gain = rand(18, 32);
+        state.clean = clamp(state.clean + gain, 0, 100);
+        bubble(pick([
+          "반짝반짝 ✨",
+          "깨끗해졌어! 🧽",
+          "상쾌하다~",
+        ]), 1200);
+        break;
+      }
+      case "talk": {
+        talkLine();
+        break;
+      }
+      default:
+        break;
     }
 
-    state.pos.x = clamp(state.pos.x, pad, rect.width - cw - pad);
-    state.pos.y = clamp(state.pos.y, 66, rect.height - ch - 10);
-  }
+    state.lastAction = now();
 
-  function render() {
-    ensurePosition();
+    // streak (playful)
+    if (type !== "talk") state.streak = clamp(state.streak + 1, 0, 999);
 
-    // Position: our CSS expects center anchoring at left/top, so add half
-    if (ui.char) {
-      ui.char.style.left = `${state.pos.x + 60}px`;
-      ui.char.style.top = `${state.pos.y + 60}px`;
+    // mood change reaction
+    const afterMood = computeMood(state).key;
+    if (beforeMood !== afterMood) {
+      bubble(moodChangeLine(afterMood), 1200);
     }
 
-    // Zodiac
-    const z = zodiacByKey(state.zodiacKey);
-    if (ui.sprite) ui.sprite.textContent = z ? z.emoji : "❓";
-    if (ui.zodiacName) ui.zodiacName.textContent = z ? z.name : "미선택";
-    if (ui.nameplate) ui.nameplate.textContent = z ? `${z.name} · LIFE-MOGOTCHI` : "새 친구를 선택해줘";
-
-    // Mood + bars
-    const m = moodLabel();
-    if (ui.moodText) ui.moodText.textContent = m.text;
-    setBar(ui.hungerBar, state.hunger);
-    setBar(ui.energyBar, state.energy);
-
-    if (ui.streakText) ui.streakText.textContent = String(state.streak || 0);
+    renderAll();
   }
 
-  /* -------------------- Daily + Decay -------------------- */
-  function applyDailyLogic() {
-    const today = dayKey();
-    if (!state.lastActiveDay) {
-      state.lastActiveDay = today;
-      state.streak = 0;
-      return;
+  function talkLine() {
+    const m = computeMood(state).key;
+
+    const lines = {
+      great: [
+        "오늘 컨디션 최고야 😺",
+        "이대로만 가자!",
+        "너 덕분이야 🙂",
+      ],
+      ok: [
+        "무난한 하루야.",
+        "밥/휴식 중 하나만 더 해줘!",
+        "오늘도 고마워.",
+      ],
+      tired: [
+        "조금 지쳤어… 😿",
+        "휴식이 필요해…",
+        "정리(청소)도 하면 좋을 듯?",
+      ],
+      bad: [
+        "나 지금 좀 힘들어…",
+        "밥이랑 휴식… 부탁…",
+        "청결도… 신경 써줘…",
+      ],
+    };
+
+    bubble(pick(lines[m] || lines.ok), 1400);
+
+    // small random request
+    if (Math.random() < 0.20) {
+      const req = pick(["feed", "rest", "clean", "play"]);
+      bubble(`요청: ${req.toUpperCase()}!`, 900);
     }
-    if (state.lastActiveDay === today) return;
-
-    const last = new Date(state.lastActiveDay + "T00:00:00");
-    const t = new Date(today + "T00:00:00");
-    const diffDays = Math.round((t - last) / 86400000);
-
-    // streak
-    if (diffDays === 1) state.streak = (state.streak || 0) + 1;
-    else state.streak = 0;
-
-    // decay based on missed days (cap)
-    const d = clamp(diffDays, 1, 7);
-    state.hunger = clamp(state.hunger - 10 * d, 0, 100);
-    state.energy = clamp(state.energy - 8 * d, 0, 100);
-
-    state.lastActiveDay = today;
-    showBubble("새로운 하루야. 다시 돌봐줘!");
   }
 
-  function tickDecay(dtMs) {
-    const dt = dtMs / 1000; // seconds
-    // slow drain
-    state.hunger = clamp(state.hunger - dt * 0.03, 0, 100);
-    state.energy = clamp(state.energy - dt * 0.025, 0, 100);
-
-    // mood converges to hunger/energy combination
-    const target = state.hunger * 0.55 + state.energy * 0.45;
-    state.mood = clamp(state.mood + (target - state.mood) * 0.02, 0, 100);
+  function moodChangeLine(moodKey) {
+    if (moodKey === "great") return "기분이 좋아졌어! 😺✨";
+    if (moodKey === "ok") return "다시 안정적이야 🙂";
+    if (moodKey === "tired") return "조금 지쳤어… 😿";
+    return "위험해… 지금 케어가 필요해 😵";
   }
 
-  /* -------------------- Actions -------------------- */
-  function canAct() {
-    if (zodiacByKey(state.zodiacKey)) return true;
-    showBubble("먼저 십이지 캐릭터를 선택해줘!");
-    openPicker();
-    return false;
+  /* ---------- movement ---------- */
+  let movingTimer = null;
+
+  function movePet(dx, dy) {
+    if (!el.pet) return;
+
+    // movement speed depends on energy
+    const speed = state.energy > 60 ? 1.6 : state.energy > 30 ? 1.2 : 0.9;
+
+    state.x = clamp(state.x + dx * speed, 12, 88);
+    state.y = clamp(state.y + dy * speed, 26, 80);
+
+    // small stat changes while moving
+    state.energy = clamp(state.energy - 0.2, 0, 100);
+    state.hunger = clamp(state.hunger - 0.05, 0, 100);
+
+    el.pet.classList.add("moving");
+    clearTimeout(movingTimer);
+    movingTimer = setTimeout(() => el.pet.classList.remove("moving"), 160);
+
+    renderAll();
   }
 
   function bump() {
-    if (!ui.char) return;
-    ui.char.classList.add("bump");
-    clearTimeout(bump._t);
-    bump._t = setTimeout(() => ui.char.classList.remove("bump"), 140);
+    if (!el.pet) return;
+    el.pet.classList.add("bump");
+    setTimeout(() => el.pet.classList.remove("bump"), 120);
   }
 
-  function actFeed() {
-    if (!canAct()) return;
-    state.hunger = clamp(state.hunger + 28, 0, 100);
-    state.energy = clamp(state.energy + 6, 0, 100);
-    state.lastActionAt = now();
-    showBubble("🍚 냠냠… 든든해!");
-    bump();
-    saveState();
-    render();
+  /* ---------- bubble ---------- */
+  let bubbleTimer = null;
+  function bubble(text, ms = 1200) {
+    if (!el.bubble) return;
+
+    el.bubble.textContent = text;
+    el.bubble.classList.add("show");
+
+    clearTimeout(bubbleTimer);
+    bubbleTimer = setTimeout(() => {
+      el.bubble.classList.remove("show");
+    }, ms);
   }
 
-  function actExercise() {
-    if (!canAct()) return;
-    state.energy = clamp(state.energy - 14, 0, 100);
-    state.hunger = clamp(state.hunger - 10, 0, 100);
-    state.mood = clamp(state.mood + 6, 0, 100);
-    state.lastActionAt = now();
-    showBubble("💪 후… 상쾌해!");
-    bump();
-    saveState();
-    render();
-  }
+  /* ---------- decay + random events ---------- */
+  function mainTick() {
+    const t = now();
+    const dt = Math.max(0, (t - state.lastTick) / 1000); // seconds
+    state.lastTick = t;
 
-  function actRest() {
-    if (!canAct()) return;
-    state.energy = clamp(state.energy + 26, 0, 100);
-    state.hunger = clamp(state.hunger - 4, 0, 100);
-    state.lastActionAt = now();
-    showBubble("😴 잠깐 쉬자…");
-    bump();
-    saveState();
-    render();
-  }
+    // decay rates per second
+    // tuned to be slow but noticeable
+    const hungerDecay = 0.06;
+    const energyDecay = 0.05;
+    const cleanDecay = 0.035;
 
-  function actTalk() {
-    if (!canAct()) return;
-    const z = zodiacByKey(state.zodiacKey);
-    const mood = moodLabel().text;
+    state.hunger = clamp(state.hunger - hungerDecay * dt, 0, 100);
+    state.energy = clamp(state.energy - energyDecay * dt, 0, 100);
+    state.clean = clamp(state.clean - cleanDecay * dt, 0, 100);
 
-    const linesGood = [
-      "오늘도 잘 돌보고 있네 🙂",
-      "지금의 너, 충분히 괜찮아.",
-      "밥 챙긴 거 최고야!",
-      "조급해하지 말자. 천천히.",
-    ];
-    const linesOk = [
-      "한 가지만 해도 충분해.",
-      "물 한 잔 + 밥 한 끼가 먼저야.",
-      "지금도 계속 나아가는 중이야.",
-      "오늘은 “유지”만 해도 성공.",
-    ];
-    const linesBad = [
-      "배고파… 밥 좀… 🥲",
-      "지치면 쉬어도 돼.",
-      "오늘은 최소한의 돌봄만 하자.",
-      "너 자신을 너무 몰아붙이지 마.",
-    ];
+    // If very low, slightly faster (soft pressure)
+    if (state.hunger < 20) state.energy = clamp(state.energy - 0.02 * dt, 0, 100);
+    if (state.clean < 20) state.energy = clamp(state.energy - 0.015 * dt, 0, 100);
 
-    const msg =
-      mood === "좋음" ? randPick(linesGood) :
-      mood === "보통" ? randPick(linesOk) : randPick(linesBad);
-
-    showBubble(`${z.name}: ${msg}`, 1700);
-    state.lastTalkAt = now();
-    state.lastActionAt = now();
-    saveState();
-    render();
-  }
-
-  /* -------------------- Movement -------------------- */
-  const keys = new Set();
-
-  function computeDirFromKeys() {
-    let dx = 0, dy = 0;
-    if (keys.has("arrowleft") || keys.has("a")) dx -= 1;
-    if (keys.has("arrowright") || keys.has("d")) dx += 1;
-    if (keys.has("arrowup") || keys.has("w")) dy -= 1;
-    if (keys.has("arrowdown") || keys.has("s")) dy += 1;
-
-    // normalize diagonal
-    if (dx !== 0 && dy !== 0) { dx *= 0.7071; dy *= 0.7071; }
-
-    state.dir.x = dx;
-    state.dir.y = dy;
-  }
-
-  function updateMovingClass() {
-    if (!ui.char) return;
-    const moving = Math.abs(state.dir.x) + Math.abs(state.dir.y) > 0.05;
-    ui.char.classList.toggle("moving", moving);
-  }
-
-  function detectDirectionChangeBump() {
-    const changed =
-      (state.dir.x !== 0 && state.lastDir.x !== 0 && Math.sign(state.dir.x) !== Math.sign(state.lastDir.x)) ||
-      (state.dir.y !== 0 && state.lastDir.y !== 0 && Math.sign(state.dir.y) !== Math.sign(state.lastDir.y));
-
-    if (changed) bump();
-    state.lastDir.x = state.dir.x;
-    state.lastDir.y = state.dir.y;
-  }
-
-  function move(dtMs) {
-    if (!ui.screen) return;
-    computeDirFromKeys();
-    updateMovingClass();
-
-    const rect = ui.screen.getBoundingClientRect();
-    const speed = 0.18; // px per ms
-    const cw = 120, ch = 120;
-    const pad = 8;
-
-    const energyFactor = clamp(0.55 + (state.energy / 100) * 0.65, 0.55, 1.2);
-    const vx = state.dir.x * speed * dtMs * energyFactor;
-    const vy = state.dir.y * speed * dtMs * energyFactor;
-
-    state.pos.x = clamp(state.pos.x + vx, pad, rect.width - cw - pad);
-    state.pos.y = clamp(state.pos.y + vy, 66, rect.height - ch - 10);
-
-    // extra drain while moving
-    const moving = Math.abs(state.dir.x) + Math.abs(state.dir.y) > 0.05;
-    if (moving) {
-      state.energy = clamp(state.energy - dtMs * 0.002, 0, 100);
-      state.hunger = clamp(state.hunger - dtMs * 0.0015, 0, 100);
+    // random micro-event every ~25-55 seconds
+    if (Math.random() < dt / rand(25, 55)) {
+      randomEvent();
     }
 
-    detectDirectionChangeBump();
-  }
-
-  function onKeyDown(e) {
-    // Prevent page scroll with arrows
-    if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) e.preventDefault();
-
-    const k = e.key.toLowerCase();
-    keys.add(k);
-
-    // Hotkeys
-    if (k === "f") actFeed();
-    if (k === "e") actExercise();
-    if (k === "r") actRest();
-    if (k === "t") actTalk();
-  }
-
-  function onKeyUp(e) {
-    keys.delete(e.key.toLowerCase());
-  }
-
-  /* -------------------- Picker -------------------- */
-  function buildZodiacGrid() {
-    if (!ui.zgrid) return;
-    ui.zgrid.innerHTML = "";
-    ZODIAC.forEach((z) => {
-      const el = document.createElement("div");
-      el.className = "zodiac";
-      el.setAttribute("data-key", z.key);
-      el.innerHTML = `<div class="e">${z.emoji}</div><div class="t">${z.name}</div>`;
-      el.addEventListener("click", () => {
-        state.zodiacKey = z.key;
-        showBubble(`${z.name} 선택 완료!`);
-        closePicker();
-        saveState();
-        render();
-      });
-      ui.zgrid.appendChild(el);
-    });
-  }
-
-  function openPicker() {
-    if (!ui.modal) return;
-    ui.modal.classList.add("show");
-  }
-
-  function closePicker() {
-    if (!ui.modal) return;
-    ui.modal.classList.remove("show");
-  }
-
-  /* -------------------- Theme (Optional) -------------------- */
-  function setTheme(theme) {
-    document.documentElement.dataset.theme = theme;
-    // light feedback
-    showBubble(`테마: ${theme}`);
-  }
-
-  function bindThemeButtons() {
-    if (!themeButtons.length) return;
-    themeButtons.forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const theme = btn.getAttribute("data-theme");
-        if (theme) setTheme(theme);
-      });
-    });
-  }
-
-  /* -------------------- Loop -------------------- */
-  let lastTs = now();
-
-  function loop() {
-    const ts = now();
-    const dt = ts - lastTs;
-    lastTs = ts;
-
-    applyDailyLogic();
-    tickDecay(dt);
-    move(dt);
-
-    // autosave every 10s
-    if (ts - (state.lastSavedAt || 0) > 10_000) saveState();
-
-    render();
-    requestAnimationFrame(loop);
-  }
-
-  /* -------------------- Bind Events -------------------- */
-  function bindEvents() {
-    // modal
-    ui.openPicker?.addEventListener("click", openPicker);
-    ui.closePicker?.addEventListener("click", closePicker);
-    ui.modal?.addEventListener("click", (e) => {
-      if (e.target === ui.modal) closePicker();
-    });
-
-    // actions
-    ui.btnFeed?.addEventListener("click", actFeed);
-    ui.btnExercise?.addEventListener("click", actExercise);
-    ui.btnRest?.addEventListener("click", actRest);
-    ui.btnTalk?.addEventListener("click", actTalk);
-
-    ui.saveNow?.addEventListener("click", () => {
-      saveState();
-      showBubble("저장했어!");
-    });
-
-    ui.hardReset?.addEventListener("click", () => {
-      if (!confirm("정말 초기화할까? 캐릭터/상태/스트릭이 모두 리셋돼.")) return;
-      localStorage.removeItem(STORAGE_KEY);
-      state = defaultState();
-      ensurePosition();
-      buildZodiacGrid();
-      render();
-      showBubble("초기화 완료!");
-    });
-
-    window.addEventListener("keydown", onKeyDown, { passive: false });
-    window.addEventListener("keyup", onKeyUp);
-
-    window.addEventListener("resize", () => {
-      ensurePosition();
-      render();
-      saveState();
-    });
-
-    bindThemeButtons();
-  }
-
-  /* -------------------- Init -------------------- */
-  function init() {
-    // If you added screws in HTML with class="screw tl" etc., CSS will show them.
-    buildZodiacGrid();
-    ensurePosition();
-    render();
-    bindEvents();
-
-    // First time: open picker
-    if (!state.zodiacKey) {
-      setTimeout(() => openPicker(), 200);
-      showBubble("십이지 캐릭터를 골라줘!");
-    } else {
-      showBubble("다시 왔네 🙂");
+    // subtle idle bubble if user inactive long
+    const idleSec = (t - state.lastAction) / 1000;
+    if (idleSec > 45 && Math.random() < dt / 18) {
+      bubble(pick([
+        "있잖아… 👀",
+        "나 여기 있어~",
+        "오늘도 한 번만 눌러줘!",
+        "심심해…",
+      ]), 1200);
     }
 
-    requestAnimationFrame(loop);
+    renderAll();
   }
 
-  init();
-})();
+  function randomEvent() {
+    const m = computeMood(state).key;
+
+    const events = [
+      () => { // snack found
+        if (Math.random() < 0.35) {
+          state.hunger = clamp(state.hunger + rand(6, 14), 0, 100);
+          bubble("바닥에서 간식 발견! 🍪", 1400);
+        } else {
+          bubble("뭔가 냄새가 나… 🤔", 1200);
+        }
+      },
+      () => { // energy dip
+        state.energy = clamp(state.energy - rand(4, 10), 0, 100);
+        bubble("갑자기 졸려… 😴", 1200);
+      },
+      () => { // mess
+        state.clean = clamp(state.clean - rand(6, 14), 0, 100);
+        bubble("어… 방이 좀… 😅", 1200);
+      },
+      () => { // wander
+        // move a bit
+        state.x = clamp(state.x + rand(-8, 8), 12, 88);
+        state.y = clamp(state.y + rand(-6, 6), 26, 80);
+        if (el.pet) el.pet.classList.add("moving");
+        setTimeout(() => el.pet?.classList.remove("moving"), 260);
+        bubble("산책 중… 🚶‍♂️", 1000);
+      },
+      () => { // mood-based line
+        const line = m === "great"
+          ? "나 오늘 기분 좋아!"
+          : m === "tired"
+            ? "조금 힘들어…"
+            : m === "bad"
+              ? "지금 케어가 필요해…"
+              : "무난무난~";
+        bubble(line, 1200);
+      },
+    ];
+
+    pick(events)();
+  }
+
+  /* ---------- theme ---------- */
+  function applyTheme(theme) {
+    const t = theme || "lcd-green";
+    document.documentElement.dataset.theme = t;
+  }
+
+  /* ---------- save/load ---------- */
+  function saveState(s) {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  function loadState() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+
+      // basic validation with fallbacks
+      const s = defaultState();
+      Object.assign(s, parsed);
+
+      s.hunger = clamp(Number(s.hunger), 0, 100);
+      s.energy = clamp(Number(s.energy), 0, 100);
+      s.clean = clamp(Number(s.clean), 0, 100);
+
+      s.x = clamp(Number(s.x), 12, 88);
+      s.y = clamp(Number(s.y), 26, 80);
+
+      s.zodiacIndex = clamp(Number(s.zodiacIndex), 0, ZODIACS.length - 1);
+      s.theme = typeof s.theme === "string" ? s.theme : "lcd-green";
+      s.petName = typeof s.petName === "string" ? s.petName : "냥이";
+
+      s.lastTick = now();
+      s.lastAction = now();
+      return s;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /* ---------- Zodiac Select (optional) ---------- */
+  function isZodiacOpen() {
+    return !!(el.select && !el.select.hidden);
+  }
+
+  function openZodiacSelect() {
+    if (!el.select) {
+      // if no selector UI exists, just rotate zodiac quickly
+      state.zodiacIndex = (state.zodiacIndex + 1) % ZODIACS.length;
+      bubble(`십이지 변경: ${ZODIACS[state.zodiacIndex].emoji} ${ZODIACS[state.zodiacIndex].name}`, 1200);
+      renderAll();
+      return;
+    }
+    zodiacCursor = state.zod
