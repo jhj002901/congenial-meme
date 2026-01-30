@@ -1,573 +1,713 @@
-/* =========================================================
-  CAT-MOGOTCHI · app.js
-  - Works with the "device + screen + pet + 3D cat" HTML
-  - Robust: will run even if some optional nodes don't exist
-========================================================= */
-
-(() => {
-  "use strict";
-
-  /* ---------- helpers ---------- */
-  const $ = (sel, root = document) => root.querySelector(sel);
-  const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
-  const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
-  const now = () => Date.now();
-
-  const rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
-  const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
-  const fmt2 = (n) => String(n).padStart(2, "0");
-
-  /* ---------- DOM (expected ids from earlier HTML) ---------- */
-  const el = {
-    moodText: $("#moodText"),
-    petName: $("#petName"),
-    zodiacLabel: $("#zodiacLabel"),
-    bubble: $("#bubble"),
-    pet: $("#pet"),
-    screen: $("#screen"),
-
-    btnFeed: $("#btnFeed"),
-    btnPlay: $("#btnPlay"),
-    btnRest: $("#btnRest"),
-    btnClean: $("#btnClean"),
-    btnTalk: $("#btnTalk"),
-
-    saveNow: $("#saveNow"),
-    resetAll: $("#resetAll"),
-
-    hungerBar: $("#hungerBar i") || $("#barHunger"),
-    energyBar: $("#energyBar i") || $("#barEnergy"),
-    cleanBar: $("#cleanBar i") || $("#barClean"),
-
-    themeBtns: $$(".tbtn"),
-    clock: $("#clock"),
-
-    // optional zodiac select mode (if you later add it)
-    btnZodiac: $("#btnZodiac"),
-    select: $("#select"),
-    prevZodiac: $("#prevZodiac"),
-    nextZodiac: $("#nextZodiac"),
-    okZodiac: $("#okZodiac"),
-    backZodiac: $("#backZodiac"),
-    zodiacEmoji: $("#zodiacEmoji"),
-    zodiacName: $("#zodiacName"),
-    zodiacHint: $("#zodiacHint"),
-  };
-
-  /* ---------- ZODIAC data ---------- */
-  const ZODIACS = [
-    { key: "rat", emoji: "🐭", name: "쥐", hint: "민첩 / 호기심" },
-    { key: "ox", emoji: "🐮", name: "소", hint: "꾸준 / 성실" },
-    { key: "tiger", emoji: "🐯", name: "호랑이", hint: "용기 / 추진" },
-    { key: "rabbit", emoji: "🐰", name: "토끼", hint: "섬세 / 배려" },
-    { key: "dragon", emoji: "🐲", name: "용", hint: "야망 / 카리스마" },
-    { key: "snake", emoji: "🐍", name: "뱀", hint: "집중 / 직관" },
-    { key: "horse", emoji: "🐴", name: "말", hint: "자유 / 에너지" },
-    { key: "goat", emoji: "🐑", name: "양", hint: "온화 / 예술" },
-    { key: "monkey", emoji: "🐵", name: "원숭이", hint: "재치 / 실험" },
-    { key: "rooster", emoji: "🐔", name: "닭", hint: "정리 / 계획" },
-    { key: "dog", emoji: "🐶", name: "개", hint: "충성 / 우정" },
-    { key: "pig", emoji: "🐷", name: "돼지", hint: "풍요 / 낙천" },
-  ];
-
-  /* ---------- STATE ---------- */
-  const STORAGE_KEY = "catmogotchi_v1";
-
-  const defaultState = () => ({
-    petName: "냥이",
-    zodiacIndex: 0,
-    theme: "lcd-green",
-
-    // stats 0..100
-    hunger: 70,
-    energy: 70,
-    clean: 70,
-
-    // position inside screen (percent)
-    x: 50,
-    y: 52,
-
-    // meta
-    lastTick: now(),
-    lastAction: now(),
-    streak: 0, // fun extra
-  });
-
-  let state = loadState() || defaultState();
-
-  // selection mode index (for zodiac carousel if present)
-  let zodiacCursor = state.zodiacIndex;
-
-  /* ---------- INIT ---------- */
-  applyTheme(state.theme);
-  renderAll(true);
-  setClock();
-  setInterval(setClock, 1000 * 15);
-
-  // main tick: decay + random events
-  setInterval(mainTick, 1000); // 1s
-
-  // autosave periodically
-  setInterval(() => saveState(state), 5000);
-
-  // Bind UI actions
-  bindButtons();
-  bindKeys();
-
-  // Show a welcome bubble
-  bubble(pick([
-    "오늘도 나를 돌봐줘 😺",
-    "밥… 줘… 🍚",
-    "놀아줘! 🧶",
-    "청소도… 부탁… 🧽",
-  ]), 1400);
-
-  /* =========================================================
-    FUNCTIONS
-  ========================================================= */
-
-  function bindButtons() {
-    el.btnFeed?.addEventListener("click", () => act("feed"));
-    el.btnPlay?.addEventListener("click", () => act("play"));
-    el.btnRest?.addEventListener("click", () => act("rest"));
-    el.btnClean?.addEventListener("click", () => act("clean"));
-    el.btnTalk?.addEventListener("click", () => act("talk"));
-
-    el.saveNow?.addEventListener("click", () => {
-      saveState(state);
-      bump();
-      bubble("저장 완료! 💾", 900);
-    });
-
-    el.resetAll?.addEventListener("click", () => {
-      if (!confirm("정말 초기화할까? (저장된 데이터가 삭제됨)")) return;
-      state = defaultState();
-      zodiacCursor = state.zodiacIndex;
-      applyTheme(state.theme);
-      renderAll(true);
-      saveState(state);
-      bubble("초기화했어. 다시 시작! ✨", 1200);
-    });
-
-    // theme buttons
-    el.themeBtns.forEach((b) => {
-      b.addEventListener("click", () => {
-        const t = b.dataset.theme;
-        applyTheme(t);
-        state.theme = t;
-        el.themeBtns.forEach((x) => x.classList.toggle("active", x === b));
-        bump();
-      });
-    });
-
-    // zodiac select mode (optional)
-    el.btnZodiac?.addEventListener("click", () => openZodiacSelect());
-    el.backZodiac?.addEventListener("click", () => closeZodiacSelect());
-    el.prevZodiac?.addEventListener("click", () => zodiacStep(-1));
-    el.nextZodiac?.addEventListener("click", () => zodiacStep(+1));
-    el.okZodiac?.addEventListener("click", () => confirmZodiac());
-  }
-
-  function bindKeys() {
-    window.addEventListener("keydown", (e) => {
-      const key = e.key.toLowerCase();
-
-      // If zodiac select open, handle it
-      if (isZodiacOpen()) {
-        if (key === "escape") return closeZodiacSelect();
-        if (key === "arrowleft" || key === "a") return zodiacStep(-1);
-        if (key === "arrowright" || key === "d") return zodiacStep(+1);
-        if (key === "enter" || key === " ") return confirmZodiac();
-        return;
-      }
-
-      // actions shortcuts
-      if (key === "f") return act("feed");
-      if (key === "p") return act("play");
-      if (key === "r") return act("rest");
-      if (key === "c") return act("clean");
-      if (key === "t") return act("talk");
-      if (key === "z") return openZodiacSelect();
-
-      // movement
-      const moveKeys = ["arrowup", "arrowdown", "arrowleft", "arrowright", "w", "a", "s", "d"];
-      if (!moveKeys.includes(key)) return;
-
-      e.preventDefault();
-
-      if (key === "arrowup" || key === "w") movePet(0, -1);
-      if (key === "arrowdown" || key === "s") movePet(0, +1);
-      if (key === "arrowleft" || key === "a") movePet(-1, 0);
-      if (key === "arrowright" || key === "d") movePet(+1, 0);
-    });
-  }
-
-  function setClock() {
-    if (!el.clock) return;
-    const d = new Date();
-    el.clock.textContent = `${fmt2(d.getHours())}:${fmt2(d.getMinutes())}`;
-  }
-
-  function renderAll(force = false) {
-    // labels
-    if (el.petName) el.petName.textContent = state.petName;
-    if (el.zodiacLabel) {
-      const z = ZODIACS[state.zodiacIndex];
-      el.zodiacLabel.textContent = z ? `${z.emoji} ${z.name}` : "—";
-    }
-
-    // theme button active state
-    if (el.themeBtns.length) {
-      el.themeBtns.forEach((b) => b.classList.toggle("active", b.dataset.theme === state.theme));
-    }
-
-    // stats bars
-    setBar(el.hungerBar, state.hunger);
-    setBar(el.energyBar, state.energy);
-    setBar(el.cleanBar, state.clean);
-
-    // mood
-    const m = computeMood(state);
-    if (el.moodText) el.moodText.textContent = m.label;
-
-    // pet position
-    if (el.pet) {
-      el.pet.style.left = `${state.x}%`;
-      el.pet.style.top = `${state.y}%`;
-    }
-
-    if (force) {
-      // ensure cursor used by zodiac select
-      zodiacCursor = state.zodiacIndex;
-      renderZodiacCard();
-    }
-  }
-
-  function setBar(barEl, value) {
-    if (!barEl) return;
-    const v = clamp(value, 0, 100);
-    barEl.style.width = `${v}%`;
-
-    // optional visual states if your CSS uses .warn/.bad on parent
-    const parent = barEl.closest(".bar");
-    if (parent) {
-      parent.classList.toggle("bad", v < 25);
-      parent.classList.toggle("warn", v >= 25 && v < 45);
-    }
-  }
-
-  function computeMood(s) {
-    // weighted score
-    const score = (s.hunger * 0.40) + (s.energy * 0.35) + (s.clean * 0.25);
-    if (score >= 78) return { key: "great", label: "좋음" };
-    if (score >= 55) return { key: "ok", label: "보통" };
-    if (score >= 35) return { key: "tired", label: "지침" };
-    return { key: "bad", label: "위험" };
-  }
-
-  /* ---------- actions ---------- */
-  function act(type) {
-    // action cooldown feel
-    bump();
-
-    const beforeMood = computeMood(state).key;
-
-    switch (type) {
-      case "feed": {
-        const gain = rand(12, 24);
-        state.hunger = clamp(state.hunger + gain, 0, 100);
-        state.clean = clamp(state.clean - rand(2, 5), 0, 100); // eating makes a bit dirty
-        bubble(pick([
-          "냠냠! 🍚",
-          "배가 든든해졌어 😺",
-          "밥 최고…!",
-          "간식도… 있나? 👀",
-        ]), 1200);
-        break;
-      }
-      case "play": {
-        const cost = rand(8, 16);
-        state.energy = clamp(state.energy - cost, 0, 100);
-        state.clean = clamp(state.clean - rand(1, 4), 0, 100);
-        state.hunger = clamp(state.hunger - rand(1, 4), 0, 100);
-        bubble(pick([
-          "놀자! 🧶",
-          "꺄악 신난다!",
-          "잡았다!! 😼",
-          "한 판 더? 👾",
-        ]), 1200);
-        // tiny reward
-        if (Math.random() < 0.18) {
-          state.hunger = clamp(state.hunger + 6, 0, 100);
-          bubble("보너스 간식 발견! 🍪", 1200);
-        }
-        break;
-      }
-      case "rest": {
-        const gain = rand(14, 28);
-        state.energy = clamp(state.energy + gain, 0, 100);
-        state.hunger = clamp(state.hunger - rand(1, 3), 0, 100);
-        bubble(pick([
-          "Zzz… 😴",
-          "잠깐 충전 완료!",
-          "휴식은 중요해…",
-        ]), 1200);
-        break;
-      }
-      case "clean": {
-        const gain = rand(18, 32);
-        state.clean = clamp(state.clean + gain, 0, 100);
-        bubble(pick([
-          "반짝반짝 ✨",
-          "깨끗해졌어! 🧽",
-          "상쾌하다~",
-        ]), 1200);
-        break;
-      }
-      case "talk": {
-        talkLine();
-        break;
-      }
-      default:
-        break;
-    }
-
-    state.lastAction = now();
-
-    // streak (playful)
-    if (type !== "talk") state.streak = clamp(state.streak + 1, 0, 999);
-
-    // mood change reaction
-    const afterMood = computeMood(state).key;
-    if (beforeMood !== afterMood) {
-      bubble(moodChangeLine(afterMood), 1200);
-    }
-
-    renderAll();
-  }
-
-  function talkLine() {
-    const m = computeMood(state).key;
-
-    const lines = {
-      great: [
-        "오늘 컨디션 최고야 😺",
-        "이대로만 가자!",
-        "너 덕분이야 🙂",
-      ],
-      ok: [
-        "무난한 하루야.",
-        "밥/휴식 중 하나만 더 해줘!",
-        "오늘도 고마워.",
-      ],
-      tired: [
-        "조금 지쳤어… 😿",
-        "휴식이 필요해…",
-        "정리(청소)도 하면 좋을 듯?",
-      ],
-      bad: [
-        "나 지금 좀 힘들어…",
-        "밥이랑 휴식… 부탁…",
-        "청결도… 신경 써줘…",
-      ],
-    };
-
-    bubble(pick(lines[m] || lines.ok), 1400);
-
-    // small random request
-    if (Math.random() < 0.20) {
-      const req = pick(["feed", "rest", "clean", "play"]);
-      bubble(`요청: ${req.toUpperCase()}!`, 900);
-    }
-  }
-
-  function moodChangeLine(moodKey) {
-    if (moodKey === "great") return "기분이 좋아졌어! 😺✨";
-    if (moodKey === "ok") return "다시 안정적이야 🙂";
-    if (moodKey === "tired") return "조금 지쳤어… 😿";
-    return "위험해… 지금 케어가 필요해 😵";
-  }
-
-  /* ---------- movement ---------- */
-  let movingTimer = null;
-
-  function movePet(dx, dy) {
-    if (!el.pet) return;
-
-    // movement speed depends on energy
-    const speed = state.energy > 60 ? 1.6 : state.energy > 30 ? 1.2 : 0.9;
-
-    state.x = clamp(state.x + dx * speed, 12, 88);
-    state.y = clamp(state.y + dy * speed, 26, 80);
-
-    // small stat changes while moving
-    state.energy = clamp(state.energy - 0.2, 0, 100);
-    state.hunger = clamp(state.hunger - 0.05, 0, 100);
-
-    el.pet.classList.add("moving");
-    clearTimeout(movingTimer);
-    movingTimer = setTimeout(() => el.pet.classList.remove("moving"), 160);
-
-    renderAll();
-  }
-
-  function bump() {
-    if (!el.pet) return;
-    el.pet.classList.add("bump");
-    setTimeout(() => el.pet.classList.remove("bump"), 120);
-  }
-
-  /* ---------- bubble ---------- */
-  let bubbleTimer = null;
-  function bubble(text, ms = 1200) {
-    if (!el.bubble) return;
-
-    el.bubble.textContent = text;
-    el.bubble.classList.add("show");
-
-    clearTimeout(bubbleTimer);
-    bubbleTimer = setTimeout(() => {
-      el.bubble.classList.remove("show");
-    }, ms);
-  }
-
-  /* ---------- decay + random events ---------- */
-  function mainTick() {
-    const t = now();
-    const dt = Math.max(0, (t - state.lastTick) / 1000); // seconds
-    state.lastTick = t;
-
-    // decay rates per second
-    // tuned to be slow but noticeable
-    const hungerDecay = 0.06;
-    const energyDecay = 0.05;
-    const cleanDecay = 0.035;
-
-    state.hunger = clamp(state.hunger - hungerDecay * dt, 0, 100);
-    state.energy = clamp(state.energy - energyDecay * dt, 0, 100);
-    state.clean = clamp(state.clean - cleanDecay * dt, 0, 100);
-
-    // If very low, slightly faster (soft pressure)
-    if (state.hunger < 20) state.energy = clamp(state.energy - 0.02 * dt, 0, 100);
-    if (state.clean < 20) state.energy = clamp(state.energy - 0.015 * dt, 0, 100);
-
-    // random micro-event every ~25-55 seconds
-    if (Math.random() < dt / rand(25, 55)) {
-      randomEvent();
-    }
-
-    // subtle idle bubble if user inactive long
-    const idleSec = (t - state.lastAction) / 1000;
-    if (idleSec > 45 && Math.random() < dt / 18) {
-      bubble(pick([
-        "있잖아… 👀",
-        "나 여기 있어~",
-        "오늘도 한 번만 눌러줘!",
-        "심심해…",
-      ]), 1200);
-    }
-
-    renderAll();
-  }
-
-  function randomEvent() {
-    const m = computeMood(state).key;
-
-    const events = [
-      () => { // snack found
-        if (Math.random() < 0.35) {
-          state.hunger = clamp(state.hunger + rand(6, 14), 0, 100);
-          bubble("바닥에서 간식 발견! 🍪", 1400);
-        } else {
-          bubble("뭔가 냄새가 나… 🤔", 1200);
-        }
-      },
-      () => { // energy dip
-        state.energy = clamp(state.energy - rand(4, 10), 0, 100);
-        bubble("갑자기 졸려… 😴", 1200);
-      },
-      () => { // mess
-        state.clean = clamp(state.clean - rand(6, 14), 0, 100);
-        bubble("어… 방이 좀… 😅", 1200);
-      },
-      () => { // wander
-        // move a bit
-        state.x = clamp(state.x + rand(-8, 8), 12, 88);
-        state.y = clamp(state.y + rand(-6, 6), 26, 80);
-        if (el.pet) el.pet.classList.add("moving");
-        setTimeout(() => el.pet?.classList.remove("moving"), 260);
-        bubble("산책 중… 🚶‍♂️", 1000);
-      },
-      () => { // mood-based line
-        const line = m === "great"
-          ? "나 오늘 기분 좋아!"
-          : m === "tired"
-            ? "조금 힘들어…"
-            : m === "bad"
-              ? "지금 케어가 필요해…"
-              : "무난무난~";
-        bubble(line, 1200);
-      },
-    ];
-
-    pick(events)();
-  }
-
-  /* ---------- theme ---------- */
-  function applyTheme(theme) {
-    const t = theme || "lcd-green";
-    document.documentElement.dataset.theme = t;
-  }
-
-  /* ---------- save/load ---------- */
-  function saveState(s) {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
-    } catch (e) {
-      // ignore
-    }
-  }
-
-  function loadState() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return null;
-      const parsed = JSON.parse(raw);
-
-      // basic validation with fallbacks
-      const s = defaultState();
-      Object.assign(s, parsed);
-
-      s.hunger = clamp(Number(s.hunger), 0, 100);
-      s.energy = clamp(Number(s.energy), 0, 100);
-      s.clean = clamp(Number(s.clean), 0, 100);
-
-      s.x = clamp(Number(s.x), 12, 88);
-      s.y = clamp(Number(s.y), 26, 80);
-
-      s.zodiacIndex = clamp(Number(s.zodiacIndex), 0, ZODIACS.length - 1);
-      s.theme = typeof s.theme === "string" ? s.theme : "lcd-green";
-      s.petName = typeof s.petName === "string" ? s.petName : "냥이";
-
-      s.lastTick = now();
-      s.lastAction = now();
-      return s;
-    } catch (e) {
-      return null;
-    }
-  }
-
-  /* ---------- Zodiac Select (optional) ---------- */
-  function isZodiacOpen() {
-    return !!(el.select && !el.select.hidden);
-  }
-
-  function openZodiacSelect() {
-    if (!el.select) {
-      // if no selector UI exists, just rotate zodiac quickly
-      state.zodiacIndex = (state.zodiacIndex + 1) % ZODIACS.length;
-      bubble(`십이지 변경: ${ZODIACS[state.zodiacIndex].emoji} ${ZODIACS[state.zodiacIndex].name}`, 1200);
-      renderAll();
-      return;
-    }
-    zodiacCursor = state.zod
+:root{
+  --bg0:#070B14;
+  --bg1:#0B1224;
+
+  --card: rgba(255,255,255,.06);
+  --card2: rgba(255,255,255,.09);
+
+  --stroke: rgba(255,255,255,.10);
+  --stroke2: rgba(255,255,255,.16);
+
+  --text: rgba(255,255,255,.92);
+  --muted: rgba(255,255,255,.70);
+  --muted2: rgba(255,255,255,.55);
+
+  --brand:#7AA7FF;
+  --brand2:#7E5CFF;
+  --accent:#2EE59D;
+
+  --shadow: 0 18px 70px rgba(0,0,0,.35);
+  --radius: 18px;
+  --radius2: 26px;
+
+  --max: 1120px;
+}
+
+*{ box-sizing:border-box; }
+html,body{ height:100%; }
+body{
+  margin:0;
+  color:var(--text);
+  font-family: "Outfit","Noto Sans KR",system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+  background:
+    radial-gradient(1200px 700px at 20% 0%, rgba(126,92,255,.25), transparent 60%),
+    radial-gradient(1100px 700px at 85% 15%, rgba(122,167,255,.22), transparent 58%),
+    radial-gradient(900px 600px at 50% 100%, rgba(46,229,157,.12), transparent 55%),
+    linear-gradient(180deg, var(--bg0), var(--bg1));
+  overflow-x:hidden;
+}
+
+a{ color:inherit; text-decoration:none; }
+b{ font-weight:700; }
+.container{
+  max-width:var(--max);
+  margin:0 auto;
+  padding: 0 20px;
+}
+
+/* Background layers */
+.bg-grid{
+  position: fixed;
+  inset: 0;
+  pointer-events:none;
+  background-image:
+    linear-gradient(rgba(255,255,255,.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,.05) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: radial-gradient(circle at 50% 18%, rgba(0,0,0,1), rgba(0,0,0,.2) 55%, rgba(0,0,0,0) 78%);
+  opacity: .22;
+  z-index: -2;
+}
+
+.bg-orbs{ position: fixed; inset:0; pointer-events:none; z-index:-1; }
+.orb{
+  position:absolute;
+  filter: blur(20px);
+  opacity:.55;
+  border-radius: 999px;
+}
+.orb.o1{
+  width: 420px; height: 420px;
+  left: -120px; top: -120px;
+  background: radial-gradient(circle, rgba(122,167,255,.55), transparent 65%);
+}
+.orb.o2{
+  width: 520px; height: 520px;
+  right: -180px; top: -160px;
+  background: radial-gradient(circle, rgba(126,92,255,.50), transparent 65%);
+}
+.orb.o3{
+  width: 520px; height: 520px;
+  left: 35%; bottom: -260px;
+  background: radial-gradient(circle, rgba(46,229,157,.30), transparent 65%);
+}
+
+/* Header */
+.header{
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  backdrop-filter: blur(14px);
+  background: linear-gradient(180deg, rgba(7,11,20,.72), rgba(7,11,20,.30));
+  border-bottom: 1px solid rgba(255,255,255,.06);
+}
+
+.nav{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap: 14px;
+  padding: 14px 0;
+}
+
+.brand{
+  display:flex;
+  align-items:center;
+  gap: 12px;
+  min-width: 240px;
+}
+.logo{
+  width: 40px;
+  height: 40px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(122,167,255,.95), rgba(126,92,255,.90));
+  border: 1px solid rgba(255,255,255,.22);
+  box-shadow: 0 16px 55px rgba(122,167,255,.18);
+  position: relative;
+  overflow:hidden;
+}
+.logo::before{
+  content:"";
+  position:absolute;
+  inset:-40%;
+  background: radial-gradient(circle, rgba(255,255,255,.55), transparent 60%);
+  transform: rotate(35deg);
+  opacity:.35;
+}
+.logo.sm{ width: 34px; height: 34px; border-radius: 12px; }
+.brand-txt strong{ font-size: 14px; font-weight:700; letter-spacing:.2px; }
+.brand-txt small{ display:block; margin-top:2px; color: var(--muted2); font-size: 12px; }
+
+.menu{
+  display:flex;
+  gap: 10px;
+  align-items:center;
+}
+.menu a{
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  padding: 10px 10px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  transition: .16s ease;
+}
+.menu a:hover{
+  color: var(--text);
+  background: rgba(255,255,255,.04);
+  border-color: rgba(255,255,255,.10);
+}
+
+.nav-actions{
+  display:flex;
+  align-items:center;
+  gap: 10px;
+  min-width: 260px;
+  justify-content:flex-end;
+}
+
+/* Buttons */
+.btn{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,.12);
+  background: rgba(255,255,255,.05);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  cursor:pointer;
+  user-select:none;
+  transition: transform .14s ease, background .14s ease, border-color .14s ease, box-shadow .14s ease;
+}
+.btn:hover{
+  transform: translateY(-1px);
+  background: rgba(255,255,255,.07);
+  border-color: rgba(255,255,255,.18);
+}
+.btn:active{ transform: translateY(0px); }
+
+.btn.primary{
+  background: linear-gradient(135deg, rgba(122,167,255,.95), rgba(126,92,255,.88));
+  border-color: rgba(122,167,255,.35);
+  box-shadow: 0 18px 60px rgba(122,167,255,.22);
+}
+.btn.primary:hover{ transform: translateY(-2px); }
+
+.btn.ghost{
+  background: rgba(255,255,255,.03);
+  border-color: rgba(255,255,255,.10);
+}
+.btn.tiny{
+  padding: 10px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+}
+
+.btn.wide{
+  width: 100%;
+}
+
+.arrow{
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  display:inline-grid;
+  place-items:center;
+  background: rgba(0,0,0,.18);
+  border: 1px solid rgba(255,255,255,.22);
+}
+
+/* Sections */
+.section{ padding: 54px 0; }
+.section.hero{ padding: 64px 0 34px; }
+
+.section-head{
+  display:flex;
+  align-items:flex-end;
+  justify-content:space-between;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.h2{
+  margin:0 0 10px;
+  font-size: 20px;
+  letter-spacing: -.2px;
+}
+.h3{
+  margin:0 0 8px;
+  font-size: 15px;
+  letter-spacing: -.12px;
+}
+.p{
+  margin:0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.75;
+}
+.muted{ color: var(--muted); }
+.muted2{ color: var(--muted2); }
+
+.head-actions{ display:flex; gap:10px; }
+
+/* Hero */
+.hero-grid{
+  display:grid;
+  grid-template-columns: 1.25fr .75fr;
+  gap: 20px;
+  align-items: start;
+}
+
+.hero-card{
+  border-radius: var(--radius2);
+  border: 1px solid rgba(255,255,255,.10);
+  background: linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.03));
+  box-shadow: var(--shadow);
+  padding: 34px;
+  position: relative;
+  overflow:hidden;
+}
+.hero-card::before{
+  content:"";
+  position:absolute;
+  inset:-2px;
+  background:
+    radial-gradient(800px 240px at 30% 0%, rgba(122,167,255,.25), transparent 60%),
+    radial-gradient(650px 240px at 80% 20%, rgba(126,92,255,.20), transparent 60%);
+  opacity: .85;
+  pointer-events:none;
+  mask-image: radial-gradient(circle at 30% 25%, rgba(0,0,0,1), rgba(0,0,0,0) 62%);
+}
+
+.pill{
+  display:inline-flex;
+  align-items:center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--stroke);
+  background: rgba(255,255,255,.04);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 12px 40px rgba(0,0,0,.18);
+  font-size: 13px;
+  color: var(--muted);
+}
+.dot{
+  width: 8px; height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--brand), var(--brand2));
+  box-shadow: 0 0 18px rgba(122,167,255,.55);
+}
+
+.hero-title{
+  margin: 16px 0 10px;
+  font-size: clamp(30px, 4.6vw, 46px);
+  line-height: 1.06;
+  letter-spacing: -.6px;
+}
+.hero-desc{
+  margin: 0;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.75;
+  max-width: 60ch;
+}
+.hero-actions{
+  display:flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 18px;
+}
+.chips{
+  display:flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 18px;
+}
+.chip{
+  font-size: 12px;
+  color: var(--muted);
+  padding: 8px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,.10);
+  background: rgba(255,255,255,.03);
+}
+
+/* Hero side */
+.hero-side{
+  display:grid;
+  gap: 12px;
+}
+.metric{
+  border-radius: var(--radius);
+  border: 1px solid rgba(255,255,255,.10);
+  background: rgba(255,255,255,.04);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 16px 55px rgba(0,0,0,.18);
+  padding: 16px;
+}
+.metric-top{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.k{ font-size: 12px; color: var(--muted); }
+.badge{
+  display:inline-flex;
+  align-items:center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--stroke);
+  background: rgba(255,255,255,.04);
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.v{
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: -.35px;
+}
+.bar{
+  height: 10px;
+  margin-top: 12px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(122,167,255,.9), rgba(126,92,255,.85), rgba(46,229,157,.75));
+  opacity:.85;
+}
+
+.mini-card{
+  border-radius: var(--radius);
+  border: 1px solid rgba(255,255,255,.10);
+  background: rgba(255,255,255,.04);
+  padding: 16px;
+  box-shadow: 0 16px 55px rgba(0,0,0,.18);
+}
+.mini-title{
+  font-weight: 800;
+  letter-spacing: -.2px;
+  margin-bottom: 10px;
+}
+.mini-list{
+  margin: 0 0 12px 18px;
+  padding: 0;
+  color: var(--muted);
+  line-height: 1.7;
+  font-size: 13px;
+}
+
+/* Cards */
+.cards{
+  display:grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+}
+.card{
+  border-radius: var(--radius);
+  border: 1px solid rgba(255,255,255,.10);
+  background: rgba(255,255,255,.04);
+  box-shadow: 0 18px 60px rgba(0,0,0,.18);
+  padding: 18px;
+  min-height: 168px;
+  position: relative;
+  overflow:hidden;
+}
+.card::before{
+  content:"";
+  position:absolute;
+  inset:-2px;
+  background:
+    radial-gradient(300px 120px at 20% 0%, rgba(122,167,255,.22), transparent 65%),
+    radial-gradient(260px 120px at 80% 20%, rgba(126,92,255,.18), transparent 60%);
+  opacity: .55;
+  pointer-events:none;
+}
+.icon{
+  width: 42px;
+  height: 42px;
+  border-radius: 14px;
+  display:grid;
+  place-items:center;
+  border: 1px solid rgba(255,255,255,.14);
+  background: rgba(255,255,255,.05);
+  margin-bottom: 10px;
+}
+.tags{
+  display:flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+.tag{
+  font-size: 12px;
+  color: var(--muted2);
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,.10);
+  background: rgba(255,255,255,.03);
+}
+
+/* Timeline */
+.timeline{
+  display:grid;
+  gap: 12px;
+}
+.step{
+  border-radius: var(--radius);
+  border: 1px solid rgba(255,255,255,.10);
+  background: rgba(255,255,255,.04);
+  box-shadow: 0 18px 60px rgba(0,0,0,.18);
+  padding: 16px;
+  display:grid;
+  grid-template-columns: 68px 1fr;
+  gap: 12px;
+  align-items:flex-start;
+}
+.step-no{
+  width: 56px; height: 56px;
+  border-radius: 18px;
+  display:grid;
+  place-items:center;
+  font-weight: 900;
+  letter-spacing: -.4px;
+  border: 1px solid rgba(122,167,255,.25);
+  background: linear-gradient(135deg, rgba(122,167,255,.20), rgba(126,92,255,.16));
+}
+
+/* Archive */
+.archive-grid{
+  display:grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+}
+.archive-card{
+  border-radius: var(--radius);
+  border: 1px solid rgba(255,255,255,.10);
+  background: rgba(255,255,255,.04);
+  box-shadow: 0 18px 60px rgba(0,0,0,.18);
+  padding: 18px;
+}
+.archive-top{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.archive-bottom{
+  display:flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+/* CTA */
+.cta{
+  border-radius: var(--radius2);
+  border: 1px solid rgba(255,255,255,.10);
+  background:
+    radial-gradient(800px 240px at 20% 0%, rgba(46,229,157,.18), transparent 60%),
+    radial-gradient(700px 260px at 80% 25%, rgba(122,167,255,.25), transparent 60%),
+    linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.03));
+  box-shadow: var(--shadow);
+  padding: 22px;
+  display:grid;
+  grid-template-columns: 1.2fr .8fr;
+  gap: 16px;
+  align-items:start;
+}
+.cta-mini{
+  display:flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+.cta-right{
+  display:grid;
+  gap: 10px;
+}
+.hint{
+  display:flex;
+  gap: 10px;
+  align-items:center;
+  color: var(--muted2);
+  font-size: 12px;
+  padding-top: 6px;
+}
+
+/* FAQ */
+.faq{
+  display:grid;
+  gap: 10px;
+}
+.faq-item{
+  border-radius: var(--radius);
+  border: 1px solid rgba(255,255,255,.10);
+  background: rgba(255,255,255,.04);
+  box-shadow: 0 18px 60px rgba(0,0,0,.18);
+  padding: 12px 14px;
+}
+.faq-item summary{
+  cursor:pointer;
+  font-weight: 800;
+  letter-spacing: -.1px;
+  color: var(--text);
+}
+.faq-body{ margin-top: 10px; }
+
+/* Footer */
+.footer{
+  padding: 26px 0 38px;
+  border-top: 1px solid rgba(255,255,255,.06);
+  margin-top: 10px;
+}
+.foot{
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.foot-brand{
+  display:flex;
+  gap: 12px;
+  align-items:center;
+}
+.foot-brand strong{ font-size: 14px; }
+.foot-brand small{ display:block; margin-top:2px; font-size: 12px; color: var(--muted2); }
+.foot-links{
+  display:flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.foot-links a{
+  font-size: 12px;
+  color: var(--muted);
+  padding: 8px 10px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  transition:.16s ease;
+}
+.foot-links a:hover{
+  color: var(--text);
+  background: rgba(255,255,255,.04);
+  border-color: rgba(255,255,255,.10);
+}
+
+/* Modal */
+.modal{
+  position: fixed;
+  inset: 0;
+  display:none;
+  z-index: 100;
+}
+.modal.show{ display:block; }
+.modal-backdrop{
+  position:absolute;
+  inset:0;
+  background: rgba(0,0,0,.55);
+  backdrop-filter: blur(6px);
+}
+.modal-panel{
+  position: relative;
+  width: min(720px, calc(100% - 28px));
+  margin: 76px auto;
+  border-radius: var(--radius2);
+  border: 1px solid rgba(255,255,255,.12);
+  background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.05));
+  box-shadow: var(--shadow);
+  overflow:hidden;
+}
+.modal-head{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap: 10px;
+  padding: 16px 16px 10px;
+  border-bottom: 1px solid rgba(255,255,255,.08);
+}
+.icon-btn{
+  width: 40px; height: 40px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,.12);
+  background: rgba(255,255,255,.04);
+  color: var(--text);
+  cursor:pointer;
+  transition: .14s ease;
+}
+.icon-btn:hover{
+  background: rgba(255,255,255,.06);
+  border-color: rgba(255,255,255,.18);
+  transform: translateY(-1px);
+}
+.modal-body{ padding: 14px 16px 16px; }
+.pre{
+  margin: 12px 0 0;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(255,255,255,.10);
+  background: rgba(0,0,0,.18);
+  color: rgba(255,255,255,.88);
+  overflow:auto;
+  line-height: 1.65;
+  font-size: 13px;
+}
+.modal-actions{
+  display:flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+/* Toast */
+.toast{
+  position: fixed;
+  left: 50%;
+  bottom: 26px;
+  transform: translateX(-50%) translateY(8px);
+  padding: 10px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,.14);
+  background: rgba(10,16,32,.78);
+  backdrop-filter: blur(12px);
+  color: rgba(255,255,255,.88);
+  font-size: 13px;
+  box-shadow: 0 16px 50px rgba(0,0,0,.28);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .18s ease, transform .18s ease;
+  z-index: 120;
+}
+.toast.show{
+  opacity: 1;
+  transform: translateX(-50%) translateY(0px);
+}
+
+/* Reveal animation */
+.reveal{
+  opacity: 0;
+  transform: translateY(12px);
+  transition: opacity .55s ease, transform .55s ease;
+}
+.reveal.in{
+  opacity: 1;
+  transform: translateY(0px);
+}
+
+/* Responsive */
+@media (max-width: 980px){
+  .menu{ display:none; }
+  .nav-actions{ min-width:auto; }
+  .hero-grid{ grid-template-columns: 1fr; }
+  .cards{ grid-template-columns: 1fr; }
+  .archive-grid{ grid-template-columns: 1fr; }
+  .cta{ grid-template-columns: 1fr; }
+  .section{ padding: 40px 0; }
+  .section.hero{ padding: 52px 0 26px; }
+  .hero-card{ padding: 24px; }
+  .step{ grid-template-columns: 58px 1fr; }
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce){
+  .reveal{ transition:none; }
+  .btn{ transition:none; }
+  .toast{ transition:none; }
+}
